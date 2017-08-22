@@ -5,9 +5,11 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"strings"
 	"github.com/nu7hatch/gouuid"
+	"sync"
 )
 
 type BotManagerError struct {
+
 	msg string
 }
 
@@ -20,8 +22,9 @@ type BotManager struct {
 
 	token string
 	bots []*BotInstance
-	commandHandlers map[string]func ([]string, string, *discordgo.Session, *BotManager)
-	sessions map[string]*BotInstance
+	commandHandlers map[string]func ([]string, string, *discordgo.Session, *BotManager, *discordgo.User)
+	sessions map[string][]*BotInstance
+	sessionLocks map[string]sync.RWMutex
 	discord *discordgo.Session
 }
 
@@ -34,11 +37,14 @@ func NewBotManager(token string) (bm *BotManager, err error) {
 	bm = &BotManager{
 		token: token,
 		bots: make([]*BotInstance, 2),
-		commandHandlers: map[string]func ([]string, string, *discordgo.Session, *BotManager){
+		commandHandlers: map[string]func ([]string, string, *discordgo.Session, *BotManager, *discordgo.User){
 			"help": help,
-			"generate": generate,
+			"start": generate,
+			"connect": connect,
+			"disconnect": disconnect,
 		},
-		sessions: make(map[string]*BotInstance),
+		sessions: make(map[string][]*BotInstance),
+		sessionLocks: make(map[string]sync.RWMutex),
 	}
 
 	discordSession, err := discordgo.New("Bot " + token)
@@ -64,6 +70,11 @@ func (bm *BotManager) Start() error{
 
 func (bm *BotManager) Stop() {
 
+	for _, sessions := range bm.sessions {
+		for _, session := range sessions {
+			session.Stop()
+		}
+	}
 	if bm.discord != nil {
 		bm.discord.Close()
 	}
@@ -83,7 +94,7 @@ func (bm *BotManager) messageCreated(s *discordgo.Session, message *discordgo.Me
 			bm.discord.ChannelMessageSend(message.ChannelID, "Invalid command. Type $$help for a list of commands")
 			return
 		}
-		command(fields[1:], message.ChannelID, s, bm)
+		command(fields[1:], message.ChannelID, s, bm, message.Author)
 	}
 }
 
@@ -95,25 +106,52 @@ func (bm *BotManager) guildCreate(session *discordgo.Session, event *discordgo.G
 
 	for _, channel := range event.Guild.Channels {
 		if strings.Contains(channel.Name, "general") {
-			_, _ = session.ChannelMessageSend(channel.ID, "Server Bridge is ready. Type $$help to see the list of commands")
+			session.ChannelMessageSend(channel.ID, "Server Bridge is ready. Type $$help to see the list of commands")
 		}
 	}
 }
 
-func help(_ []string, channelID string, session *discordgo.Session, _ *BotManager) {
+func (bm *BotManager) listen(b *BotInstance, sessionID string) {
+
+	lock := bm.sessionLocks[sessionID]
+	for {
+		select {
+		case packet, ok := <-b.VoiceConnection.OpusRecv:
+			if ok == false {
+				continue
+			}
+
+			lock.RLock()
+			siblings := make([]*BotInstance, len(bm.sessions[sessionID]))
+			copy(siblings, bm.sessions[sessionID])
+			lock.RUnlock()
+
+			for _, s := range siblings {
+				if s.GuildID != b.GuildID {
+					s.VoiceConnection.OpusSend <- packet.Opus
+
+				}
+			}
+		case <- b.stop:
+			return
+		}
+	}
+}
+
+func help(_ []string, channelID string, session *discordgo.Session, _ *BotManager, _ *discordgo.User) {
 
 	msg := "List of commands: \n" +
 		"$$help - prints this message\n" +
-		"$$generate - Generates a unique ID to be used when bridging\n" +
+		"$$start - Generates a unique session ID to be used when bridging\n" +
 		"$$connect <UID> - Connects to the specified session and begins the bridge\n" +
 		"$$disconnect - Disconnects from session"
 	session.ChannelMessageSend(channelID, msg)
 }
 
-func generate(_ []string, channelID string, session *discordgo.Session, bm *BotManager) {
+func generate(_ []string, channelID string, session *discordgo.Session, bm *BotManager, _ *discordgo.User) {
 
 	if bm == nil {
-		session.ChannelMessageSend(channelID, "PANIC")
+		session.ChannelMessageSend(channelID, "Something went really wrong. Hide yo kids")
 		return
 	}
 	uuid, err := uuid.NewV4()
@@ -122,11 +160,137 @@ func generate(_ []string, channelID string, session *discordgo.Session, bm *BotM
 		return
 	}
 	uuid_str := uuid.String()
+	uuid_str = uuid_str[:4]
 	_, ok := bm.sessions[uuid_str]
 	if ok == true {
 		session.ChannelMessageSend(channelID, "Generated unique id already exists. PANIC")
 		return
 	}
 	bm.sessions[uuid_str] = nil
+	bm.sessionLocks[uuid_str] = sync.RWMutex{}
 	session.ChannelMessageSend(channelID, "Session id generated: " + uuid_str)
+}
+
+func connect(params []string, channelID string, session *discordgo.Session, bm *BotManager, author *discordgo.User) {
+
+	if len(params) == 0 {
+		session.ChannelMessageSend(channelID, "Must provide session id with $$connect")
+		return
+	}
+
+	sessionId := params[0]
+
+	sessionsLock, ok := bm.sessionLocks[sessionId]
+	if ok == false {
+		session.ChannelMessageSend(channelID, "SessionID not found")
+		return
+	}
+
+	channel, err := session.Channel(channelID)
+	if err != nil {
+		return
+	}
+
+	voiceConn := getVoiceConnection(session, channel, author.ID)
+	if voiceConn == nil {
+		session.ChannelMessageSend(channelID, "Must be in voice channel to bridge")
+		return
+	}
+
+	sessionsLock.RLock()
+	sessions, ok := bm.sessions[sessionId]
+	sessionsLock.RUnlock()
+
+	if ok == false {
+		session.ChannelMessageSend(channelID, "SessionID not found")
+		return
+	}
+
+	if findChannel(sessions, channel.GuildID) == false {
+		botInst := NewBotInstance(channel.GuildID, voiceConn)
+		sessions = append(sessions, botInst)
+
+		sessionsLock.Lock()
+		bm.sessions[sessionId] = sessions
+		sessionsLock.Unlock()
+
+		go bm.listen(botInst, sessionId)
+	}
+}
+
+func disconnect(params []string, channelID string, session *discordgo.Session, bm *BotManager, _ *discordgo.User) {
+
+	if len(params) == 0 {
+		session.ChannelMessageSend(channelID, "Must provide session id with $$disconnect")
+		return
+	}
+	sessionId := params[0]
+	sessions, ok := bm.sessions[sessionId]
+	if ok == false {
+		session.ChannelMessageSend(channelID, "SessionID not found")
+		return
+	}
+
+	sessionsLock, ok := bm.sessionLocks[sessionId]
+	if ok == false {
+		session.ChannelMessageSend(channelID, "SessionID not found")
+		return
+	}
+
+	channel, err := session.Channel(channelID)
+	if err != nil {
+		return
+	}
+
+	sessionIdx := -1
+	for i, session := range sessions {
+		if session.GuildID == channel.GuildID {
+			session.Stop()
+			sessionIdx = i
+		}
+	}
+	if sessionIdx != -1 {
+		session.ChannelMessageSend(channelID, "Disconnecting client from voice channel")
+		sessionsLock.Lock()
+		sessions = append(sessions[:sessionIdx], sessions[sessionIdx + 1:]...)
+		sessionsLock.Unlock()
+		if len(sessions) == 0 {
+			session.ChannelMessageSend(channelID, "This was the last client in the session." +
+			"Terminating session. You must create a new session if you want to use the bot again.")
+			delete(bm.sessions, sessionId)
+		} else {
+			bm.sessions[sessionId] = sessions
+		}
+	} else {
+		session.ChannelMessageSend(channelID, "Must be a part of session to disconnect from it")
+	}
+
+}
+
+func findChannel(instances []*BotInstance, guildId string) bool {
+
+	for _, session := range instances {
+		if session.GuildID == guildId {
+			return true
+		}
+	}
+	return false
+}
+
+func getVoiceConnection(session *discordgo.Session, channel *discordgo.Channel, userId string) *discordgo.VoiceConnection {
+
+	guild, err := session.State.Guild(channel.GuildID)
+	if err != nil {
+		return nil
+	}
+	for _, vs := range guild.VoiceStates {
+		if vs.UserID == userId {
+			result, err := session.ChannelVoiceJoin(guild.ID, vs.ChannelID, false, false)
+			if err != nil {
+				return nil
+			}
+			return result
+		}
+	}
+	return nil
 }
