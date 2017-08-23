@@ -271,9 +271,9 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 			session.ChannelMessageSend(channelID, "Disconnected client from voice channel")
 
 			sessionsLock.Lock()
-			tmpSesssions := bm.sessions[sessionId]
+			tmpSessions := bm.sessions[sessionId]
 
-			if compare(tmpSesssions, sessions) == false {
+			if compare(tmpSessions, sessions) == false {
 				sessionsLock.Unlock()
 				continue
 			}
