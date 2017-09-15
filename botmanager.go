@@ -2,14 +2,14 @@
 package discord_bridge
 
 import (
-	"github.com/bwmarrin/discordgo"
-	"strings"
-	"github.com/nu7hatch/gouuid"
 	"sync"
+	"strings"
+	"github.com/bwmarrin/discordgo"
+	"github.com/Link512/gouuid"
+	"reflect"
 )
 
 type BotManagerError struct {
-
 	msg string
 }
 
@@ -18,13 +18,17 @@ func (e BotManagerError) Error() string {
 	return e.msg
 }
 
-type BotManager struct {
+type session struct {
+	Send      chan voicePacket
+	Instances []*botInstance
+}
 
-	token string
-	commandHandlers map[string]func ([]string, string, *discordgo.Session, *BotManager, *discordgo.User)
-	sessions map[string][]*BotInstance
-	sessionLocks map[string]*sync.RWMutex
-	discord *discordgo.Session
+type BotManager struct {
+	token           string
+	commandHandlers map[string]func([]string, string, *discordgo.Session, *BotManager, *discordgo.User)
+	sessions        map[string]session
+	sessionLocks    map[string]*sync.RWMutex
+	discord         *discordgo.Session
 }
 
 func NewBotManager(token string) (bm *BotManager, err error) {
@@ -35,13 +39,13 @@ func NewBotManager(token string) (bm *BotManager, err error) {
 
 	bm = &BotManager{
 		token: token,
-		commandHandlers: map[string]func ([]string, string, *discordgo.Session, *BotManager, *discordgo.User){
-			"help": help,
-			"start": generate,
-			"connect": connect,
+		commandHandlers: map[string]func([]string, string, *discordgo.Session, *BotManager, *discordgo.User){
+			"help":       help,
+			"start":      generate,
+			"connect":    connect,
 			"disconnect": disconnect,
 		},
-		sessions: make(map[string][]*BotInstance),
+		sessions:     make(map[string]session),
 		sessionLocks: make(map[string]*sync.RWMutex),
 	}
 
@@ -57,7 +61,7 @@ func NewBotManager(token string) (bm *BotManager, err error) {
 	return bm, nil
 }
 
-func (bm *BotManager) Start() error{
+func (bm *BotManager) Start() error {
 
 	err := bm.discord.Open()
 	if err != nil {
@@ -68,9 +72,9 @@ func (bm *BotManager) Start() error{
 
 func (bm *BotManager) Stop() {
 
-	for _, sessions := range bm.sessions {
-		for _, session := range sessions {
-			session.Stop()
+	for _, session := range bm.sessions {
+		for _, botInstance := range session.Instances {
+			botInstance.Stop()
 		}
 	}
 	if bm.discord != nil {
@@ -78,9 +82,9 @@ func (bm *BotManager) Stop() {
 	}
 }
 
-func (bm *BotManager) messageCreated(s *discordgo.Session, message *discordgo.MessageCreate) {
+func (bm *BotManager) messageCreated(session *discordgo.Session, message *discordgo.MessageCreate) {
 
-	if message.Author.ID == s.State.User.ID {
+	if message.Author.ID == session.State.User.ID {
 		return
 	}
 
@@ -92,7 +96,7 @@ func (bm *BotManager) messageCreated(s *discordgo.Session, message *discordgo.Me
 			bm.discord.ChannelMessageSend(message.ChannelID, "Invalid command. Type $$help for a list of commands")
 			return
 		}
-		command(fields[1:], message.ChannelID, s, bm, message.Author)
+		command(fields[1:], message.ChannelID, session, bm, message.Author)
 	}
 }
 
@@ -105,34 +109,6 @@ func (bm *BotManager) guildCreate(session *discordgo.Session, event *discordgo.G
 	for _, channel := range event.Guild.Channels {
 		if strings.Contains(channel.Name, "general") {
 			session.ChannelMessageSend(channel.ID, "Server Bridge is ready. Type $$help to see the list of commands")
-		}
-	}
-}
-
-func (bm *BotManager) listen(b *BotInstance, sessionID string) {
-
-	lock := bm.sessionLocks[sessionID]
-	for {
-		select {
-		case packet, ok := <-b.VoiceConnection.OpusRecv:
-			if ok == false {
-				continue
-			}
-
-			lock.RLock()
-			siblings := make([]*BotInstance, len(bm.sessions[sessionID]))
-			copy(siblings, bm.sessions[sessionID])
-			lock.RUnlock()
-
-			for _, s := range siblings {
-				if s.GuildID != b.GuildID {
-					s.VoiceConnection.Speaking(true)
-					s.VoiceConnection.OpusSend <- packet.Opus
-					s.VoiceConnection.Speaking(false)
-
-				}
-			}
-		case <- b.stop:
 			return
 		}
 	}
@@ -148,27 +124,26 @@ func help(_ []string, channelID string, session *discordgo.Session, _ *BotManage
 	session.ChannelMessageSend(channelID, msg)
 }
 
-func generate(_ []string, channelID string, session *discordgo.Session, bm *BotManager, _ *discordgo.User) {
+func generate(_ []string, channelID string, discordSession *discordgo.Session, bm *BotManager, _ *discordgo.User) {
 
 	if bm == nil {
-		session.ChannelMessageSend(channelID, "Something went really wrong. Hide yo kids")
+		discordSession.ChannelMessageSend(channelID, "Something went really wrong. Hide yo kids")
 		return
 	}
 	uuid, err := uuid.NewV4()
 	if err != nil {
-		session.ChannelMessageSend(channelID, "There was an error generating the unique id")
+		discordSession.ChannelMessageSend(channelID, "There was an error generating the unique id")
 		return
 	}
-	uuid_str := uuid.String()
-	uuid_str = uuid_str[:4]
-	_, ok := bm.sessions[uuid_str]
-	if ok == true {
-		session.ChannelMessageSend(channelID, "Generated unique id already exists. PANIC")
+	uuid_str := uuid.StringNoSeparator()
+
+	if _, ok := bm.sessions[uuid_str]; ok == true {
+		discordSession.ChannelMessageSend(channelID, "Generated unique id already exists. PANIC")
 		return
 	}
-	bm.sessions[uuid_str] = nil
+	bm.sessions[uuid_str] = session{make(chan voicePacket), nil}
 	bm.sessionLocks[uuid_str] = &sync.RWMutex{}
-	session.ChannelMessageSend(channelID, "Session id generated: " + uuid_str)
+	discordSession.ChannelMessageSend(channelID, "Session id generated: "+uuid_str)
 }
 
 func connect(params []string, channelID string, session *discordgo.Session, bm *BotManager, author *discordgo.User) {
@@ -180,9 +155,7 @@ func connect(params []string, channelID string, session *discordgo.Session, bm *
 
 	sessionId := params[0]
 
-	_, ok := bm.sessions[sessionId]
-
-	if ok == false {
+	if _, ok := bm.sessions[sessionId]; ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
 	}
@@ -204,30 +177,32 @@ func connect(params []string, channelID string, session *discordgo.Session, bm *
 		return
 	}
 
-	botInst := NewBotInstance(channel.GuildID, voiceConn)
+	botInst := NewBotInstance(channel.GuildID, voiceConn, nil)
 
-	for success := false ; success == false ; {
+	for success := false; success == false; {
 
 		sessionsLock.RLock()
-		sessions := bm.sessions[sessionId]
+		botSession := bm.sessions[sessionId]
 		sessionsLock.RUnlock()
 
-		_, found := findChannel(sessions, channel.GuildID)
+		_, found := findChannel(botSession.Instances, channel.GuildID)
 
 		if found == false {
-			sessions = append(sessions, botInst)
-
 			sessionsLock.Lock()
-			tmpSessions := bm.sessions[sessionId]
+			tmpSessions := bm.sessions[sessionId].Instances
 
-			if compare(sessions, tmpSessions) == false {
+			if reflect.DeepEqual(botSession.Instances, tmpSessions) == false {
 				sessionsLock.Unlock()
 				continue
 			}
-			bm.sessions[sessionId] = sessions
+			botSession.Instances = append(botSession.Instances, botInst)
+
+			botInst.Recv = botSession.Send
+			bm.sessions[sessionId] = botSession
 			sessionsLock.Unlock()
 
-			go bm.listen(botInst, sessionId)
+			go botInst.Broadcast()
+			go botInst.Listen()
 		}
 		success = true
 	}
@@ -241,8 +216,7 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 	}
 	sessionId := params[0]
 
-	_, ok := bm.sessions[sessionId]
-	if ok == false {
+	if _, ok := bm.sessions[sessionId]; ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
 	}
@@ -258,73 +232,45 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 		return
 	}
 
-	for success := false ; success == false ; {
+	for success := false; success == false; {
 
 		sessionsLock.RLock()
-		sessions := bm.sessions[sessionId]
+		botSession := bm.sessions[sessionId]
 		sessionsLock.RUnlock()
 
-		sessionIdx, found := findChannel(sessions, channel.GuildID)
+		sessionIdx, found := findChannel(botSession.Instances, channel.GuildID)
 
-		if found == true {
-
-			session.ChannelMessageSend(channelID, "Disconnected client from voice channel")
-
-			sessionsLock.Lock()
-			tmpSessions := bm.sessions[sessionId]
-
-			if compare(tmpSessions, sessions) == false {
-				sessionsLock.Unlock()
-				continue
-			}
-			sessions[sessionIdx].Stop()
-
-			sessions = append(sessions[:sessionIdx], sessions[sessionIdx+1:]...)
-			if len(sessions) == 0 {
-				session.ChannelMessageSend(channelID, "This was the last client in the session."+
-					"Terminating session. You must create a new session if you want to use the bot again.")
-				delete(bm.sessions, sessionId)
-				delete(bm.sessionLocks, sessionId)
-			} else {
-				bm.sessions[sessionId] = sessions
-			}
-			sessionsLock.Unlock()
-		} else {
+		if found == false {
 			session.ChannelMessageSend(channelID, "Must be a part of session to disconnect from it")
+			break
 		}
+
+		session.ChannelMessageSend(channelID, "Disconnected client from voice channel")
+
+		sessionsLock.Lock()
+		tmpSessions := bm.sessions[sessionId].Instances
+
+		if reflect.DeepEqual(tmpSessions, botSession.Instances) == false {
+			sessionsLock.Unlock()
+			continue
+		}
+		botSession.Instances[sessionIdx].Stop()
+
+		botSession.Instances = append(botSession.Instances[:sessionIdx], botSession.Instances[sessionIdx+1:]...)
+		if len(botSession.Instances) == 0 {
+			session.ChannelMessageSend(channelID, "This was the last client in the session."+
+				"Terminating session. You must create a new session if you want to use the bot again.")
+			delete(bm.sessions, sessionId)
+			delete(bm.sessionLocks, sessionId)
+		} else {
+			bm.sessions[sessionId] = botSession
+		}
+		sessionsLock.Unlock()
 		success = true
 	}
 }
 
-func compare(lhs, rhs []*BotInstance) bool{
-
-	if (lhs == nil) != (rhs == nil) {
-		return false
-	}
-
-	if len(lhs) != len(rhs) {
-		return false
-	}
-
-	occurrences := make(map[string]int)
-
-	for _, inst := range lhs {
-		occurrences[inst.GuildID]++
-	}
-
-	for _, inst := range rhs {
-
-		if occurrences[inst.GuildID] > 0 {
-			occurrences[inst.GuildID]--
-			continue
-		}
-		return false
-	}
-	return true
-
-}
-
-func findChannel(instances []*BotInstance, guildId string) (int, bool) {
+func findChannel(instances []*botInstance, guildId string) (int, bool) {
 
 	for i, session := range instances {
 		if session.GuildID == guildId {
@@ -342,11 +288,10 @@ func getVoiceConnection(session *discordgo.Session, channel *discordgo.Channel, 
 	}
 	for _, vs := range guild.VoiceStates {
 		if vs.UserID == userId {
-			result, err := session.ChannelVoiceJoin(guild.ID, vs.ChannelID, false, false)
-			if err != nil {
-				return nil
+			if result, err := session.ChannelVoiceJoin(guild.ID, vs.ChannelID, false, false); err == nil {
+				return result
 			}
-			return result
+			return nil
 		}
 	}
 	return nil
