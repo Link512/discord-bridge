@@ -12,16 +12,16 @@ func main() {
 
 	token := os.Getenv("CHANNEL_BRIDGE_TOKEN")
 	if token == "" {
-		fmt.Println("Please set CHANNEL_BRIDGE_TOKEN environment variable with the token")
+		fmt.Println("Please set CHANNEL_BRIDGE_TOKEN environment variable with the discord bot token")
 		return
 	}
-	bm, err := discord_bridge.NewBotManager(token)
+	bridge, err := discord_bridge.NewBridge(token)
 	if err != nil {
 		fmt.Println("Couldn't initialize BotManager:" + err.Error())
 		return
 	}
 
-	err = bm.Start()
+	err = bridge.Start()
 	if err != nil {
 		fmt.Println("Couldn't start BotManager: " + err.Error())
 		return
@@ -30,5 +30,5 @@ func main() {
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
 
-	bm.Stop()
+	bridge.Stop()
 }

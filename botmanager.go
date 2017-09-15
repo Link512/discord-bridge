@@ -3,7 +3,6 @@ package discord_bridge
 
 import (
 	"sync"
-	"strings"
 	"github.com/bwmarrin/discordgo"
 	"github.com/Link512/gouuid"
 	"reflect"
@@ -23,45 +22,24 @@ type session struct {
 	Instances []*botInstance
 }
 
-type BotManager struct {
-	token           string
-	commandHandlers map[string]func([]string, string, *discordgo.Session, *BotManager, *discordgo.User)
-	sessions        map[string]session
-	sessionLocks    map[string]*sync.RWMutex
-	discord         *discordgo.Session
+type botManager struct {
+	sessions     map[string]session
+	sessionLocks map[string]*sync.RWMutex
+	discord      *discordgo.Session
 }
 
-func NewBotManager(token string) (bm *BotManager, err error) {
+func newBotManager(discordSession *discordgo.Session) *botManager {
 
-	if token == "" {
-		return nil, BotManagerError{"Token can't be empty"}
-	}
-
-	bm = &BotManager{
-		token: token,
-		commandHandlers: map[string]func([]string, string, *discordgo.Session, *BotManager, *discordgo.User){
-			"help":       help,
-			"start":      generate,
-			"connect":    connect,
-			"disconnect": disconnect,
-		},
+	bm := &botManager{
 		sessions:     make(map[string]session),
 		sessionLocks: make(map[string]*sync.RWMutex),
+		discord:      discordSession,
 	}
 
-	discordSession, err := discordgo.New("Bot " + token)
-	if err != nil {
-		return nil, BotManagerError{"Couldn't initialize BotManager: " + err.Error()}
-	}
-	bm.discord = discordSession
-
-	bm.discord.AddHandler(bm.guildCreate)
-	bm.discord.AddHandler(bm.messageCreated)
-
-	return bm, nil
+	return bm
 }
 
-func (bm *BotManager) Start() error {
+func (bm *botManager) Start() error {
 
 	err := bm.discord.Open()
 	if err != nil {
@@ -70,7 +48,7 @@ func (bm *BotManager) Start() error {
 	return nil
 }
 
-func (bm *BotManager) Stop() {
+func (bm *botManager) Stop() {
 
 	for _, session := range bm.sessions {
 		for _, botInstance := range session.Instances {
@@ -82,49 +60,7 @@ func (bm *BotManager) Stop() {
 	}
 }
 
-func (bm *BotManager) messageCreated(session *discordgo.Session, message *discordgo.MessageCreate) {
-
-	if message.Author.ID == session.State.User.ID {
-		return
-	}
-
-	if strings.HasPrefix(message.Content, "$$") {
-		fields := strings.Fields(message.Content)
-		cmd := strings.TrimPrefix(fields[0], "$$")
-		command, ok := bm.commandHandlers[cmd]
-		if ok == false {
-			bm.discord.ChannelMessageSend(message.ChannelID, "Invalid command. Type $$help for a list of commands")
-			return
-		}
-		command(fields[1:], message.ChannelID, session, bm, message.Author)
-	}
-}
-
-func (bm *BotManager) guildCreate(session *discordgo.Session, event *discordgo.GuildCreate) {
-
-	if event.Guild.Unavailable {
-		return
-	}
-
-	for _, channel := range event.Guild.Channels {
-		if strings.Contains(channel.Name, "general") {
-			session.ChannelMessageSend(channel.ID, "Server Bridge is ready. Type $$help to see the list of commands")
-			return
-		}
-	}
-}
-
-func help(_ []string, channelID string, session *discordgo.Session, _ *BotManager, _ *discordgo.User) {
-
-	msg := "List of commands: \n" +
-		"$$help - prints this message\n" +
-		"$$start - Generates a unique session ID to be used when bridging\n" +
-		"$$connect <UID> - Connects to the specified session and begins the bridge\n" +
-		"$$disconnect - Disconnects from session"
-	session.ChannelMessageSend(channelID, msg)
-}
-
-func generate(_ []string, channelID string, discordSession *discordgo.Session, bm *BotManager, _ *discordgo.User) {
+func (bm *botManager) generate(channelID string, discordSession *discordgo.Session) {
 
 	if bm == nil {
 		discordSession.ChannelMessageSend(channelID, "Something went really wrong. Hide yo kids")
@@ -146,21 +82,14 @@ func generate(_ []string, channelID string, discordSession *discordgo.Session, b
 	discordSession.ChannelMessageSend(channelID, "Session id generated: "+uuid_str)
 }
 
-func connect(params []string, channelID string, session *discordgo.Session, bm *BotManager, author *discordgo.User) {
+func (bm *botManager) connect(sessionID string, channelID string, session *discordgo.Session, author *discordgo.User) {
 
-	if len(params) == 0 {
-		session.ChannelMessageSend(channelID, "Must provide session id with $$connect")
-		return
-	}
-
-	sessionId := params[0]
-
-	if _, ok := bm.sessions[sessionId]; ok == false {
+	if _, ok := bm.sessions[sessionID]; ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
 	}
 
-	sessionsLock, ok := bm.sessionLocks[sessionId]
+	sessionsLock, ok := bm.sessionLocks[sessionID]
 	if ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
@@ -182,14 +111,14 @@ func connect(params []string, channelID string, session *discordgo.Session, bm *
 	for success := false; success == false; {
 
 		sessionsLock.RLock()
-		botSession := bm.sessions[sessionId]
+		botSession := bm.sessions[sessionID]
 		sessionsLock.RUnlock()
 
 		_, found := findChannel(botSession.Instances, channel.GuildID)
 
 		if found == false {
 			sessionsLock.Lock()
-			tmpSessions := bm.sessions[sessionId].Instances
+			tmpSessions := bm.sessions[sessionID].Instances
 
 			if reflect.DeepEqual(botSession.Instances, tmpSessions) == false {
 				sessionsLock.Unlock()
@@ -198,7 +127,7 @@ func connect(params []string, channelID string, session *discordgo.Session, bm *
 			botSession.Instances = append(botSession.Instances, botInst)
 
 			botInst.Recv = botSession.Send
-			bm.sessions[sessionId] = botSession
+			bm.sessions[sessionID] = botSession
 			sessionsLock.Unlock()
 
 			go botInst.Broadcast()
@@ -208,20 +137,14 @@ func connect(params []string, channelID string, session *discordgo.Session, bm *
 	}
 }
 
-func disconnect(params []string, channelID string, session *discordgo.Session, bm *BotManager, _ *discordgo.User) {
+func (bm *botManager) disconnect(sessionID string, channelID string, session *discordgo.Session) {
 
-	if len(params) == 0 {
-		session.ChannelMessageSend(channelID, "Must provide session id with $$disconnect")
-		return
-	}
-	sessionId := params[0]
-
-	if _, ok := bm.sessions[sessionId]; ok == false {
+	if _, ok := bm.sessions[sessionID]; ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
 	}
 
-	sessionsLock, ok := bm.sessionLocks[sessionId]
+	sessionsLock, ok := bm.sessionLocks[sessionID]
 	if ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
@@ -235,7 +158,7 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 	for success := false; success == false; {
 
 		sessionsLock.RLock()
-		botSession := bm.sessions[sessionId]
+		botSession := bm.sessions[sessionID]
 		sessionsLock.RUnlock()
 
 		sessionIdx, found := findChannel(botSession.Instances, channel.GuildID)
@@ -248,7 +171,7 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 		session.ChannelMessageSend(channelID, "Disconnected client from voice channel")
 
 		sessionsLock.Lock()
-		tmpSessions := bm.sessions[sessionId].Instances
+		tmpSessions := bm.sessions[sessionID].Instances
 
 		if reflect.DeepEqual(tmpSessions, botSession.Instances) == false {
 			sessionsLock.Unlock()
@@ -260,10 +183,10 @@ func disconnect(params []string, channelID string, session *discordgo.Session, b
 		if len(botSession.Instances) == 0 {
 			session.ChannelMessageSend(channelID, "This was the last client in the session."+
 				"Terminating session. You must create a new session if you want to use the bot again.")
-			delete(bm.sessions, sessionId)
-			delete(bm.sessionLocks, sessionId)
+			delete(bm.sessions, sessionID)
+			delete(bm.sessionLocks, sessionID)
 		} else {
-			bm.sessions[sessionId] = botSession
+			bm.sessions[sessionID] = botSession
 		}
 		sessionsLock.Unlock()
 		success = true

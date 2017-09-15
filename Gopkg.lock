@@ -5,7 +5,7 @@
   branch = "master"
   name = "github.com/Link512/gouuid"
   packages = ["."]
-  revision = "179d4d0c4d8d407a32af483c2354df1d2c91e6c3"
+  revision = "b0f8bd5309dfaa6f8a6379ecd7ddb6d6578a02c4"
 
 [[projects]]
   name = "github.com/bwmarrin/discordgo"
