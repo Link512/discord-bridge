@@ -6,24 +6,35 @@ import (
 )
 
 type voicePacket struct {
-	GuildID string
-	Packet  *discordgo.Packet
+	botID  string
+	Packet *discordgo.Packet
 }
 
+type botChannel chan voicePacket
+
 type botInstance struct {
-	GuildID         string
+	ID              string
+	Join            chan botChannel
+	Leave           chan botChannel
+	Send            botChannel
 	voiceConnection *discordgo.VoiceConnection
-	Recv            chan voicePacket
+	recv            botChannel
 	stop            chan bool
 }
 
-func NewBotInstance(guildID string, vc *discordgo.VoiceConnection, recv chan voicePacket) *botInstance {
+func NewBotInstance(id string,
+	vc *discordgo.VoiceConnection,
+	joinChan chan botChannel,
+	leaveChan chan botChannel,
+	sendChan botChannel) *botInstance {
 
 	return &botInstance{
-		GuildID:         guildID,
+		ID:              id,
+		Join:            joinChan,
+		Leave:           leaveChan,
+		Send:            sendChan,
 		voiceConnection: vc,
 		stop:            make(chan bool),
-		Recv:            recv,
 	}
 }
 
@@ -37,30 +48,30 @@ func (b *botInstance) Stop() {
 
 func (b *botInstance) Listen() {
 
+	go b.receive()
+	b.recv = make(chan voicePacket)
+	b.Join <- b.recv
 	for {
 		select {
 		case packet, ok := <-b.voiceConnection.OpusRecv:
 			if !ok {
 				continue
 			}
-			b.Recv <- voicePacket{b.GuildID, packet}
+			b.Send <- voicePacket{b.ID, packet}
 		case <-b.stop:
+			b.Leave <- b.recv
+			close(b.recv)
 			return
 		}
 	}
 }
 
-func (b *botInstance) Broadcast() {
+func (b *botInstance) receive() {
 
-	for {
-		select {
-		case packet := <-b.Recv:
-			if packet.GuildID == b.GuildID {
-				continue
-			}
-			b.voiceConnection.OpusSend <- packet.Packet.Opus
-		case <-b.stop:
-			return
+	for packet := range b.recv {
+		if packet.botID == b.ID {
+			continue
 		}
+		b.voiceConnection.OpusSend <- packet.Packet.Opus
 	}
 }
