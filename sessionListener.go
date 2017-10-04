@@ -1,4 +1,4 @@
-// Listener for each bot sessio. It receives voice packets and broadcasts them to all the
+// Listener for each bot session. It receives voice packets and broadcasts them to all the
 // bot instances
 package discord_bridge
 
@@ -14,7 +14,6 @@ type sessionListener struct {
 	leave         chan botChannel
 	incoming      chan voicePacket
 	botChannels   map[botChannel]bool
-	instancesLock sync.Mutex
 	botInstances  []*botInstance
 	wait          sync.WaitGroup
 }
@@ -27,7 +26,6 @@ func NewSessionListener() *sessionListener {
 		make(chan botChannel),
 		make(chan voicePacket),
 		make(map[botChannel]bool),
-		sync.Mutex{},
 		make([]*botInstance, 0),
 		sync.WaitGroup{},
 	}
@@ -38,16 +36,12 @@ func NewSessionListener() *sessionListener {
 func (sl *sessionListener) AddBotInstance(botID string, voiceConn *discordgo.VoiceConnection) {
 
 	b := NewBotInstance(botID, voiceConn, sl.join, sl.leave, sl.incoming)
-	sl.instancesLock.Lock()
-	defer sl.instancesLock.Unlock()
 	go b.Listen()
 	sl.botInstances = append(sl.botInstances, b)
 }
 
 func (sl *sessionListener) RemoveBotInstance(botID string) error {
 
-	sl.instancesLock.Lock()
-	defer sl.instancesLock.Unlock()
 	idx := -1
 	for i := range sl.botInstances {
 		if sl.botInstances[i].ID == botID {
@@ -64,18 +58,15 @@ func (sl *sessionListener) RemoveBotInstance(botID string) error {
 }
 
 func (sl *sessionListener) Empty() bool {
-	sl.instancesLock.Lock()
-	defer sl.instancesLock.Unlock()
+
 	return len(sl.botInstances) == 0
 }
 
 func (sl *sessionListener) Stop() {
 
-	sl.instancesLock.Lock()
 	for _, inst := range sl.botInstances {
 		inst.Stop()
 	}
-	sl.instancesLock.Unlock()
 	sl.wait.Wait()
 	close(sl.stop)
 }

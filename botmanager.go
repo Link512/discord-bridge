@@ -2,10 +2,10 @@
 package discord_bridge
 
 import (
-	"sync"
-	"github.com/bwmarrin/discordgo"
-	"github.com/Link512/gouuid"
 	"fmt"
+	"github.com/Link512/gouuid"
+	"github.com/bwmarrin/discordgo"
+	"sync"
 )
 
 type session struct {
@@ -26,7 +26,6 @@ func newBotManager(discordSession *discordgo.Session) *botManager {
 		sessionLock: sync.RWMutex{},
 		discord:     discordSession,
 	}
-
 	return bm
 }
 
@@ -60,20 +59,22 @@ func (bm *botManager) generate(channelID string, discordSession *discordgo.Sessi
 		discordSession.ChannelMessageSend(channelID, "There was an error generating the unique id")
 		return
 	}
-	uuid_str := uuid.StringNoSeparator()
+	uuidStr := uuid.StringNoSeparator()
 
-	if _, ok := bm.sessions[uuid_str]; ok == true {
+	if _, ok := bm.sessions[uuidStr]; ok == true {
 		discordSession.ChannelMessageSend(channelID, "Generated unique id already exists. PANIC")
 		return
 	}
 	bm.sessionLock.Lock()
-	bm.sessions[uuid_str] = NewSessionListener()
+	bm.sessions[uuidStr] = NewSessionListener()
 	bm.sessionLock.Unlock()
-	discordSession.ChannelMessageSend(channelID, "Session id generated: "+uuid_str)
+	discordSession.ChannelMessageSend(channelID, "Session id generated: "+uuidStr)
 }
 
 func (bm *botManager) connect(sessionID string, channelID string, session *discordgo.Session, author *discordgo.User) {
 
+	bm.sessionLock.Lock()
+	defer bm.sessionLock.Unlock()
 	if _, ok := bm.sessions[sessionID]; ok == false {
 		session.ChannelMessageSend(channelID, "SessionID not found")
 		return
@@ -91,8 +92,6 @@ func (bm *botManager) connect(sessionID string, channelID string, session *disco
 		return
 	}
 
-	bm.sessionLock.Lock()
-	defer bm.sessionLock.Unlock()
 	bm.sessions[sessionID].AddBotInstance(channel.GuildID, voiceConn)
 }
 
