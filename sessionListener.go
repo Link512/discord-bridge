@@ -1,21 +1,20 @@
-// Listener for each bot session. It receives voice packets and broadcasts them to all the
-// bot instances
+// Listener for each bot session. It receives voice packets and broadcasts them to all the bot instances
 package discord_bridge
 
 import (
+	"fmt"
 	"github.com/bwmarrin/discordgo"
 	"sync"
-	"fmt"
 )
 
 type sessionListener struct {
-	stop          chan bool
-	join          chan botChannel
-	leave         chan botChannel
-	incoming      chan voicePacket
-	botChannels   map[botChannel]bool
-	botInstances  []*botInstance
-	wait          sync.WaitGroup
+	stop         chan bool
+	join         chan botChannel
+	leave        chan botChannel
+	incoming     chan voicePacket
+	botChannels  map[botChannel]bool
+	botInstances []*botInstance
+	wait         sync.WaitGroup
 }
 
 func NewSessionListener() *sessionListener {
