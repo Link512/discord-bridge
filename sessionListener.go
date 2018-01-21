@@ -82,6 +82,7 @@ func (sl *sessionListener) listen() {
 			}
 		case ch := <-sl.join:
 			{
+				//test
 				sl.wait.Add(1)
 				sl.botChannels[ch] = true
 			}
